@@ -260,12 +260,26 @@ struct ContentView: View {
                 }
                 
                 Divider()
-                
+
+                // Browser Streaming
+                controlSection(title: "Browser Stream", icon: "globe") {
+                    browserStreamControls
+                }
+
+                Divider()
+
                 // Streaming Controls
                 controlSection(title: "Streaming", icon: "antenna.radiowaves.left.and.right") {
                     streamingControls
                 }
-                
+
+                Divider()
+
+                // Window Layers
+                controlSection(title: "Window Layers", icon: "square.3.layers.3d") {
+                    windowLayerControls
+                }
+
                 Spacer()
             }
             .padding()
@@ -289,61 +303,64 @@ struct ContentView: View {
     private var displayControls: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Preset")
+                Text("Resolution")
                     .font(.subheadline)
                 Spacer()
-            }
-            
-            // Landscape presets
-            HStack {
-                Text("Landscape")
+                Text(viewModel.selectedResolutionSummary)
                     .font(.caption)
                     .foregroundColor(.secondary)
-                    .frame(width: 70, alignment: .leading)
-                
-                HStack(spacing: 6) {
-                    presetButton("1080p", preset: .standard1080p)
-                    presetButton("4K", preset: .high4K)
+            }
+
+            Picker("Resolution", selection: $viewModel.selectedResolution) {
+                ForEach(DisplayResolutionPreset.ordered) { resolution in
+                    Text(resolution.displayName).tag(resolution)
                 }
             }
+            .labelsHidden()
             .disabled(viewModel.isDisplayActive)
-            
-            // Portrait presets
-            HStack {
-                Text("Portrait")
+
+            Picker("Orientation", selection: $viewModel.selectedOrientation) {
+                ForEach(DisplayOrientation.allCases) { orientation in
+                    Text(orientation.displayName).tag(orientation)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .disabled(viewModel.isDisplayActive)
+
+            Toggle("HiDPI (Retina) - renders at 2x, 4x the pixels", isOn: $viewModel.hiDPIEnabled)
+                .font(.caption)
+                .disabled(viewModel.isDisplayActive)
+
+            if let error = viewModel.displayError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
-                    .foregroundColor(.secondary)
-                    .frame(width: 70, alignment: .leading)
-                
-                HStack(spacing: 6) {
-                    presetButton("1080p", preset: .portrait1080p)
-                    presetButton("4K", preset: .portrait4K)
+                    .foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 8) {
+                Button(action: viewModel.toggleDisplay) {
+                    HStack {
+                        Image(systemName: viewModel.isDisplayActive ? "stop.fill" : "play.fill")
+                        Text(viewModel.isDisplayActive ? "Stop Display" : "Start Display")
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(viewModel.isDisplayActive ? .red : .green)
+                .controlSize(.large)
+
+                if viewModel.isDisplayActive && viewModel.isDisplayReady {
+                    Button(action: viewModel.captureFrame) {
+                        Image(systemName: "camera")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .help("Capture frame to Downloads")
                 }
             }
-            .disabled(viewModel.isDisplayActive)
-            
-            Button(action: viewModel.toggleDisplay) {
-                HStack {
-                    Image(systemName: viewModel.isDisplayActive ? "stop.fill" : "play.fill")
-                    Text(viewModel.isDisplayActive ? "Stop Display" : "Start Display")
-                }
-                .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(viewModel.isDisplayActive ? .red : .green)
-            .controlSize(.large)
         }
-    }
-    
-    private func presetButton(_ title: String, preset: VirtualDisplayController.ConfigurationPreset) -> some View {
-        Button(title) {
-            Task { @MainActor in
-                viewModel.selectedPreset = preset
-            }
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .tint(viewModel.selectedPreset == preset ? .accentColor : .secondary)
     }
     
     private var recordingControls: some View {
@@ -407,6 +424,256 @@ struct ContentView: View {
         .tint(viewModel.recordingQuality == quality ? .accentColor : .secondary)
     }
     
+    // MARK: - Browser Stream
+
+    private var browserStreamControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Port + frame rate
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Port")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    TextField("8080", text: $viewModel.streamPort)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                        .frame(width: 90)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("FPS Target")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Picker("", selection: $viewModel.streamFPS) {
+                        ForEach([15, 24, 30, 45, 60], id: \.self) { fps in
+                            Text("\(fps)").tag(fps)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("FPS Min")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Picker("", selection: $viewModel.streamMinFPS) {
+                        Text("Off").tag(0)
+                        ForEach([1, 2, 5, 10], id: \.self) { fps in
+                            Text("\(fps)").tag(fps)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity)
+                }
+            }
+            .disabled(viewModel.isBrowserStreaming)
+
+            Text(viewModel.streamMinFPS == 0
+                 ? "A still screen sends nothing at all — encoded fps drops to 0 by design."
+                 : "A still screen refreshes one band at \(viewModel.streamMinFPS) fps, about a sixth of a frame each time.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            // Codec
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Codec")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Picker("", selection: $viewModel.streamCodec) {
+                    Text("JPEG").tag(BrowserStreamCodec.jpeg)
+                    Text("H.264").tag(BrowserStreamCodec.h264)
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                Text(viewModel.streamCodec == .jpeg
+                     ? "Sharpest text, works in every browser; more data when a lot moves."
+                     : "Much less data when scrolling or moving windows. Browsers that can't decode it get JPEG.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .disabled(viewModel.isBrowserStreaming)
+
+            // Quality
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Quality")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Text("\(Int(viewModel.streamQuality * 100))%")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+                Slider(value: $viewModel.streamQuality, in: 0.2...0.95, step: 0.05)
+                    .onChange(of: viewModel.streamQuality) { newValue in
+                        viewModel.applyStreamQuality(newValue)
+                    }
+            }
+
+            // Resolution scale
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Resolution")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Text(viewModel.streamOutputSizeText)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+                Picker("", selection: $viewModel.streamScale) {
+                    Text("Full").tag(1.0)
+                    Text("75%").tag(0.75)
+                    Text("50%").tag(0.5)
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+
+                Picker("", selection: $viewModel.streamMaxWidth) {
+                    Text("Native").tag(0)
+                    Text("≤4K").tag(3840)
+                    Text("≤2K").tag(2560)
+                    Text("≤1080p").tag(1920)
+                    Text("≤720p").tag(1280)
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+            }
+            .disabled(viewModel.isBrowserStreaming)
+
+            Toggle("Allow viewers to control the Mac", isOn: $viewModel.streamAllowsControl)
+                .disabled(viewModel.isBrowserStreaming)
+                .help("Mouse, touch, scrolling and keyboard from the browser, limited to this virtual display. Viewers need the PIN shown below.")
+
+            Button(action: viewModel.toggleBrowserStream) {
+                HStack {
+                    Image(systemName: viewModel.isBrowserStreaming ? "stop.circle.fill" : "globe.badge.chevron.backward")
+                    Text(viewModel.isBrowserStreaming ? "Stop Server" : "Start Server")
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(viewModel.isBrowserStreaming ? .red : .blue)
+            .controlSize(.large)
+            .disabled(!viewModel.isDisplayReady)
+
+            if let error = viewModel.browserStreamError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if viewModel.isBrowserStreaming {
+                browserStreamEndpointList
+                if let pin = viewModel.browserStreamControlPIN {
+                    HStack {
+                        Image(systemName: "lock.fill")
+                        Text("Control PIN")
+                        Spacer()
+                        Text(pin)
+                            .font(.system(.title3, design: .monospaced).bold())
+                            .textSelection(.enabled)
+                    }
+                    .font(.caption)
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.12)))
+                    .help("A viewer enters this in the browser to control the Mac. It changes every time the server starts.")
+                }
+                browserStreamStatsView
+            } else {
+                Text("Serves a full-screen viewer page and pushes frames over WebSocket. Open the URL on any device on the same network.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var browserStreamEndpointList: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Open on another device")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            if viewModel.browserStreamEndpoints.isEmpty {
+                Text("No network interfaces found")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            ForEach(viewModel.browserStreamEndpoints) { endpoint in
+                HStack(spacing: 6) {
+                    Image(systemName: endpoint.address.isPrivateLAN ? "wifi" : "network")
+                        .font(.caption)
+                        .foregroundColor(endpoint.address.isPrivateLAN ? .green : .secondary)
+                        .frame(width: 16)
+
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(endpoint.url)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text(endpoint.interfaceName)
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary)
+                    }
+
+                    Spacer(minLength: 4)
+
+                    Button {
+                        viewModel.copy(endpoint.url)
+                    } label: {
+                        Image(systemName: viewModel.copiedURL == endpoint.url ? "checkmark" : "doc.on.doc")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Copy URL")
+
+                    Button {
+                        if let url = URL(string: endpoint.url) {
+                            NSWorkspace.shared.open(url)
+                        }
+                    } label: {
+                        Image(systemName: "arrow.up.forward.app")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Open in browser")
+                }
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.1)))
+            }
+        }
+    }
+
+    private var browserStreamStatsView: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            statRow("Viewers", "\(viewModel.browserStreamStats.clientCount)")
+            statRow("  on H.264", "\(viewModel.browserStreamStats.videoClientCount)")
+            statRow("Encoded", "\(Int(viewModel.browserStreamStats.captureFPS)) fps")
+            statRow("Delivered", "\(Int(viewModel.browserStreamStats.deliveredFPS)) fps")
+            statRow("Bitrate", viewModel.browserStreamBitrateText)
+            statRow("Frame size", viewModel.browserStreamSizeText)
+        }
+        .font(.caption)
+        .foregroundColor(.secondary)
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.1)))
+    }
+
+    private func statRow(_ title: String, _ value: String) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Text(value)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundColor(.primary)
+        }
+    }
+
     private var streamingControls: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -471,6 +738,78 @@ struct ContentView: View {
         .buttonStyle(.bordered)
         .tint(viewModel.streamingFormat == format ? .accentColor : .secondary)
     }
+
+    // MARK: - Window Layers
+
+    private var windowLayerControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Toggle("Track & raise all windows", isOn: Binding(
+                get: { viewModel.isTrackingWindowLayers },
+                set: { _ in viewModel.toggleWindowLayerTracking() }
+            ))
+            .toggleStyle(.switch)
+
+            if !viewModel.windowLayerAccessibilityTrusted {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Accessibility access recommended", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+
+                    Text("Without it, raising falls back to app activation. Grant access for precise per-window control.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Button("Open Accessibility Settings") {
+                        viewModel.openAccessibilitySettings()
+                    }
+                    .font(.caption)
+                }
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.08)))
+            }
+
+            HStack {
+                Text("Frontmost app")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Text(viewModel.frontmostAppName ?? "—")
+                    .font(.caption.bold())
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("· \(viewModel.frontmostAppWindowCount) windows")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            HStack {
+                Text("Tracked apps")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Text("\(viewModel.trackedAppCount)")
+                    .font(.system(.caption, design: .monospaced))
+            }
+
+            Button(action: viewModel.bringFrontmostAppWindowsToFront) {
+                HStack {
+                    Image(systemName: "rectangle.stack.badge.plus")
+                    Text("Raise Frontmost App's Windows")
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .disabled(!viewModel.isTrackingWindowLayers || viewModel.frontmostAppName == nil)
+
+            if let name = viewModel.lastRaisedAppName {
+                Text("Last raised: \(name)")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
 }
 
 // MARK: - View Model
@@ -480,7 +819,10 @@ class ContentViewModel: ObservableObject {
     // Display state
     @Published var isDisplayActive = false
     @Published var isDisplayReady = false
-    @Published var selectedPreset: VirtualDisplayController.ConfigurationPreset = .standard1080p
+    @Published var selectedResolution: DisplayResolutionPreset = .fullHD
+    @Published var selectedOrientation: DisplayOrientation = .landscape
+    @Published var hiDPIEnabled = false
+    @Published var displayError: String?
     @Published var displayResolution: CGSize = .zero
     @Published var displayScaleFactor: CGFloat = 1.0
     @Published var isCursorInside = false
@@ -498,15 +840,58 @@ class ContentViewModel: ObservableObject {
     @Published var streamingFormat: StreamingFormat = .h264
     @Published var streamingFrameCount: Int64 = 0
     @Published var streamingBytesOutput: Int64 = 0
-    
+
+    // Browser stream state
+    @Published var streamPort: String = BrowserStreamDefaults.port {
+        didSet { BrowserStreamDefaults.port = streamPort }
+    }
+    @Published var streamFPS: Int = BrowserStreamDefaults.fps {
+        didSet { BrowserStreamDefaults.fps = streamFPS }
+    }
+    @Published var streamMinFPS: Int = BrowserStreamDefaults.minFPS {
+        didSet { BrowserStreamDefaults.minFPS = streamMinFPS }
+    }
+    @Published var streamQuality: Double = BrowserStreamDefaults.quality {
+        didSet { BrowserStreamDefaults.quality = streamQuality }
+    }
+    @Published var streamScale: Double = BrowserStreamDefaults.scale {
+        didSet { BrowserStreamDefaults.scale = streamScale }
+    }
+    /// Cap on the streamed width in pixels; 0 streams the display's native width
+    @Published var streamMaxWidth: Int = BrowserStreamDefaults.maxWidth {
+        didSet { BrowserStreamDefaults.maxWidth = streamMaxWidth }
+    }
+    @Published var isBrowserStreaming = false
+    @Published var browserStreamStats = BrowserStreamStats()
+    @Published var browserStreamEndpoints: [BrowserStreamEndpoint] = []
+    @Published var browserStreamControlPIN: String?
+    @Published var streamCodec: BrowserStreamCodec = BrowserStreamDefaults.codec {
+        didSet { BrowserStreamDefaults.codec = streamCodec }
+    }
+    @Published var streamAllowsControl: Bool = BrowserStreamDefaults.allowsControl {
+        didSet { BrowserStreamDefaults.allowsControl = streamAllowsControl }
+    }
+    @Published var browserStreamError: String?
+    @Published var copiedURL: String?
+
+    // Window layer tracking state
+    @Published var isTrackingWindowLayers = false
+    @Published var windowLayerAccessibilityTrusted = false
+    @Published var frontmostAppName: String?
+    @Published var frontmostAppWindowCount = 0
+    @Published var trackedAppCount = 0
+    @Published var lastRaisedAppName: String?
+
     private(set) var controller: VirtualDisplayController!
     private var cancellables = Set<AnyCancellable>()
+    private var windowLayerCancellables = Set<AnyCancellable>()
     private nonisolated(unsafe) var globalHotkeyMonitor: Any?
     private nonisolated(unsafe) var localHotkeyMonitor: Any?
     
     init() {
         setupController()
         setupGlobalHotkey()
+        observeWindowLayers()
     }
     
     deinit {
@@ -578,8 +963,19 @@ class ContentViewModel: ObservableObject {
     }
     
     private func setupController() {
-        controller = VirtualDisplayController(preset: selectedPreset)
+        controller = VirtualDisplayController(
+            resolution: selectedResolution,
+            orientation: selectedOrientation,
+            hiDPI: hiDPIEnabled
+        )
         observeController()
+    }
+
+    /// The resolution that will be used the next time the display starts
+    var selectedResolutionSummary: String {
+        let size = selectedResolution.pixelSize(for: selectedOrientation)
+        guard hiDPIEnabled else { return "\(size.width)x\(size.height)" }
+        return "\(size.width)x\(size.height) @2x = \(size.width * 2)x\(size.height * 2) px"
     }
     
     private func observeController() {
@@ -642,6 +1038,114 @@ class ContentViewModel: ObservableObject {
                 self?.streamingFrameRate = value
             }
             .store(in: &cancellables)
+
+        controller.$isBrowserStreaming
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] value in
+                self?.isBrowserStreaming = value
+            }
+            .store(in: &cancellables)
+
+        controller.$browserStreamStats
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] value in
+                self?.browserStreamStats = value
+            }
+            .store(in: &cancellables)
+
+        controller.$browserStreamEndpoints
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] value in
+                self?.browserStreamEndpoints = value
+            }
+            .store(in: &cancellables)
+
+        controller.$browserStreamControlPIN
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] value in
+                self?.browserStreamControlPIN = value
+            }
+            .store(in: &cancellables)
+
+        controller.$browserStreamError
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] value in
+                self?.browserStreamError = value
+            }
+            .store(in: &cancellables)
+
+        // A display that never comes online leaves the UI stuck in "active";
+        // reset it so the user can fix the settings and start again.
+        controller.$displayError
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] value in
+                guard let self = self else { return }
+                self.displayError = value
+                if value != nil {
+                    self.isDisplayActive = false
+                    self.isDisplayReady = false
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    private func observeWindowLayers() {
+        let coordinator = WindowLayerCoordinator.shared
+
+        coordinator.$isTracking
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] value in self?.isTrackingWindowLayers = value }
+            .store(in: &windowLayerCancellables)
+
+        coordinator.$accessibilityTrusted
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] value in self?.windowLayerAccessibilityTrusted = value }
+            .store(in: &windowLayerCancellables)
+
+        coordinator.$frontmostApp
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] app in
+                self?.frontmostAppName = app?.name
+                self?.frontmostAppWindowCount = app?.windowCount ?? 0
+            }
+            .store(in: &windowLayerCancellables)
+
+        coordinator.$appGroups
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] groups in self?.trackedAppCount = groups.count }
+            .store(in: &windowLayerCancellables)
+
+        coordinator.$lastRaisedAppName
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] name in self?.lastRaisedAppName = name }
+            .store(in: &windowLayerCancellables)
+
+        // Sync initial values
+        isTrackingWindowLayers = coordinator.isTracking
+        windowLayerAccessibilityTrusted = coordinator.accessibilityTrusted
+        frontmostAppName = coordinator.frontmostApp?.name
+        frontmostAppWindowCount = coordinator.frontmostApp?.windowCount ?? 0
+        trackedAppCount = coordinator.appGroups.count
+        lastRaisedAppName = coordinator.lastRaisedAppName
+    }
+
+    func toggleWindowLayerTracking() {
+        let coordinator = WindowLayerCoordinator.shared
+        if coordinator.isTracking {
+            coordinator.stop()
+        } else {
+            coordinator.start()
+        }
+    }
+
+    func bringFrontmostAppWindowsToFront() {
+        WindowLayerCoordinator.shared.bringFrontmostAppWindowsToFront()
+    }
+
+    func openAccessibilitySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
     }
     
     // MARK: - Computed Properties
@@ -674,7 +1178,40 @@ class ContentViewModel: ObservableObject {
     var streamingDataText: String {
         ByteCountFormatter.string(fromByteCount: streamingBytesOutput, countStyle: .file)
     }
-    
+
+    var browserStreamBitrateText: String {
+        let bitrate = browserStreamStats.bitrate
+        if bitrate >= 1_000_000 {
+            return String(format: "%.1f Mbps", bitrate / 1_000_000)
+        }
+        return String(format: "%.0f kbps", bitrate / 1_000)
+    }
+
+    /// What the stream will send, given the display size and the two limits
+    var streamOutputSizeText: String {
+        let display = displayResolution == .zero
+            ? CGSize(
+                width: CGFloat(selectedResolution.pixelSize(for: selectedOrientation).width),
+                height: CGFloat(selectedResolution.pixelSize(for: selectedOrientation).height)
+              )
+            : CGSize(
+                width: displayResolution.width * displayScaleFactor,
+                height: displayResolution.height * displayScaleFactor
+              )
+
+        var configuration = BrowserStreamConfiguration()
+        configuration.scale = streamScale
+        configuration.maximumWidth = streamMaxWidth > 0 ? streamMaxWidth : nil
+        let size = BrowserStreamServer.outputSize(for: display, configuration: configuration)
+        return "\(Int(size.width))×\(Int(size.height))"
+    }
+
+    var browserStreamSizeText: String {
+        let size = browserStreamStats.frameSize
+        guard size != .zero else { return "—" }
+        return "\(Int(size.width))×\(Int(size.height))"
+    }
+
     // MARK: - Actions
     
     func toggleDisplay() {
@@ -692,9 +1229,13 @@ class ContentViewModel: ObservableObject {
             isDisplayActive = false
             isDisplayReady = false
         } else {
-            // Recreate controller with selected preset
-            controller = VirtualDisplayController(preset: selectedPreset)
-            observeController()
+            // Release the previous display before creating a new one - two
+            // CGVirtualDisplays with the same identity cannot coexist, and the
+            // stale one would keep the new display from coming online.
+            controller.stop()
+
+            displayError = nil
+            setupController()
             controller.start()
             isDisplayActive = true
             recordingPulse = true
@@ -765,10 +1306,10 @@ class ContentViewModel: ObservableObject {
             case .raw:
                 config = StreamOutputConfiguration(format: .rawPixelBuffer)
             }
-            
+
             streamingFrameCount = 0
             streamingBytesOutput = 0
-            
+
             do {
                 try controller.startStreaming(configuration: config) { [weak self] data, time, isKeyFrame in
                     Task { @MainActor in
@@ -778,6 +1319,77 @@ class ContentViewModel: ObservableObject {
                 }
             } catch {
                 print("Failed to start streaming: \(error)")
+            }
+        }
+    }
+
+    // MARK: - Browser Stream
+
+    func toggleBrowserStream() {
+        if isBrowserStreaming {
+            controller.stopBrowserStream()
+            return
+        }
+
+        guard let port = UInt16(streamPort.trimmingCharacters(in: .whitespaces)), port >= 1024 else {
+            browserStreamError = "Enter a port between 1024 and 65535."
+            return
+        }
+
+        browserStreamError = nil
+
+        let configuration = BrowserStreamConfiguration(
+            port: port,
+            targetFPS: streamFPS,
+            minimumFPS: streamMinFPS,
+            jpegQuality: streamQuality,
+            scale: streamScale,
+            maximumWidth: streamMaxWidth > 0 ? streamMaxWidth : nil,
+            showCursor: true,
+            codec: streamCodec,
+            allowsControl: streamAllowsControl
+        )
+
+        do {
+            try controller.startBrowserStream(configuration: configuration)
+        } catch {
+            browserStreamError = error.localizedDescription
+        }
+    }
+
+    func applyStreamQuality(_ quality: Double) {
+        guard isBrowserStreaming else { return }
+        controller.setBrowserStreamQuality(quality)
+    }
+
+    func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        copiedURL = text
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if copiedURL == text { copiedURL = nil }
+        }
+    }
+
+    func captureFrame() {
+        Task {
+            let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
+            let dateFormatter = DateFormatter()
+            dateFormatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+            let filename = "VirtualDisplay_\(dateFormatter.string(from: Date())).jpg"
+            let fileURL = downloadsURL.appendingPathComponent(filename)
+
+            do {
+                if let url = try await controller.captureFrame(to: fileURL) {
+                    print("✅ Frame captured to: \(url.path)")
+                    NSWorkspace.shared.open(url)
+                } else {
+                    print("❌ Capture returned no URL")
+                }
+            } catch {
+                print("❌ Capture failed: \(error)")
             }
         }
     }
@@ -795,6 +1407,63 @@ enum StreamingFormat: String, CaseIterable {
     case h264
     case hevc
     case raw
+}
+
+/// Persisted browser-stream settings, so a port survives app restarts
+enum BrowserStreamDefaults {
+    private static let defaults = UserDefaults.standard
+
+    static var port: String {
+        get { defaults.string(forKey: "browserStreamPort") ?? "8080" }
+        set { defaults.set(newValue, forKey: "browserStreamPort") }
+    }
+
+    static var fps: Int {
+        get {
+            let stored = defaults.integer(forKey: "browserStreamFPS")
+            return stored > 0 ? stored : 30
+        }
+        set { defaults.set(newValue, forKey: "browserStreamFPS") }
+    }
+
+    static var minFPS: Int {
+        get {
+            guard defaults.object(forKey: "browserStreamMinFPS") != nil else { return 2 }
+            return defaults.integer(forKey: "browserStreamMinFPS")
+        }
+        set { defaults.set(newValue, forKey: "browserStreamMinFPS") }
+    }
+
+    static var quality: Double {
+        get {
+            let stored = defaults.double(forKey: "browserStreamQuality")
+            return stored > 0 ? stored : 0.6
+        }
+        set { defaults.set(newValue, forKey: "browserStreamQuality") }
+    }
+
+    static var maxWidth: Int {
+        get { defaults.integer(forKey: "browserStreamMaxWidth") }
+        set { defaults.set(newValue, forKey: "browserStreamMaxWidth") }
+    }
+
+    static var scale: Double {
+        get {
+            let stored = defaults.double(forKey: "browserStreamScale")
+            return stored > 0 ? stored : 1.0
+        }
+        set { defaults.set(newValue, forKey: "browserStreamScale") }
+    }
+
+    static var codec: BrowserStreamCodec {
+        get { defaults.string(forKey: "browserStreamCodec").flatMap(BrowserStreamCodec.init(rawValue:)) ?? .jpeg }
+        set { defaults.set(newValue.rawValue, forKey: "browserStreamCodec") }
+    }
+
+    static var allowsControl: Bool {
+        get { defaults.bool(forKey: "browserStreamAllowsControl") }
+        set { defaults.set(newValue, forKey: "browserStreamAllowsControl") }
+    }
 }
 
 // MARK: - Preview

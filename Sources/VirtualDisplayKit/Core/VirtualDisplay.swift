@@ -92,13 +92,20 @@ public final class VirtualDisplay: ObservableObject {
     // MARK: - Private Properties
     
     private var virtualDisplay: CGVirtualDisplay?
+    /// The configuration actually used, which may carry a recovered serial number
+    private var activeConfiguration: VirtualDisplayConfiguration
+    private var didRetryWithNewIdentity = false
+    private var didApplyPreferredMode = false
     // Using nonisolated(unsafe) to allow cleanup in deinit
     private nonisolated(unsafe) var screenChangeSubscription: AnyCancellable?
     private nonisolated(unsafe) var cursorTrackingSubscription: AnyCancellable?
     private nonisolated(unsafe) var retrySubscription: AnyCancellable?
     private var retryCount = 0
     
-    private static let maxRetries = 50
+    // 10s. Displays normally come online in well under a second; the budget is
+    // generous because a busy window server can take longer, but short enough
+    // that the identity fallback below still fits in a reasonable wait.
+    private static let maxRetries = 100
     private static let retryInterval: TimeInterval = 0.1
     private static let cursorTrackingInterval: TimeInterval = 0.25
     
@@ -108,6 +115,14 @@ public final class VirtualDisplay: ObservableObject {
     /// - Parameter configuration: The display configuration to use
     public init(configuration: VirtualDisplayConfiguration = VirtualDisplayConfiguration()) {
         self.configuration = configuration
+
+        // A previous run may have found this identity unusable and recorded a
+        // replacement; start from that instead of failing the same way again.
+        var active = configuration
+        if let recovered = DisplayIdentityStore.recoveredSerial(for: configuration) {
+            active.serialNumber = recovered
+        }
+        self.activeConfiguration = active
     }
     
     deinit {
@@ -128,18 +143,25 @@ public final class VirtualDisplay: ObservableObject {
         // Create descriptor
         let descriptor = CGVirtualDisplayDescriptor()
         descriptor.setDispatchQueue(DispatchQueue.main)
-        descriptor.name = configuration.name
-        descriptor.maxPixelsWide = configuration.maxWidth
-        descriptor.maxPixelsHigh = configuration.maxHeight
-        descriptor.sizeInMillimeters = configuration.physicalSizeMillimeters
-        descriptor.vendorID = configuration.vendorID
-        descriptor.productID = configuration.productID
-        descriptor.serialNum = configuration.serialNumber
+        descriptor.name = activeConfiguration.name
+        // HiDPI modes need a framebuffer twice the mode size; handing CoreGraphics
+        // a smaller budget yields a display that is created but never comes online.
+        descriptor.maxPixelsWide = activeConfiguration.effectiveMaxWidth
+        descriptor.maxPixelsHigh = activeConfiguration.effectiveMaxHeight
+        descriptor.sizeInMillimeters = activeConfiguration.physicalSizeMillimeters
+        descriptor.vendorID = activeConfiguration.vendorID
+        descriptor.productID = activeConfiguration.productID
+        descriptor.serialNum = activeConfiguration.serialNumber
+        descriptor.terminationHandler = { _, _ in
+            print("[VirtualDisplay] Display terminated by the system")
+        }
         
         print("[VirtualDisplay] Creating display with config:")
-        print("  - Name: \(configuration.name)")
-        print("  - Max size: \(configuration.maxWidth)x\(configuration.maxHeight)")
-        print("  - Modes: \(configuration.displayModes.map { "\($0.width)x\($0.height)@\($0.refreshRate)Hz" })")
+        print("  - Name: \(activeConfiguration.name)")
+        print("  - Max size: \(activeConfiguration.maxWidth)x\(activeConfiguration.maxHeight)"
+              + " (framebuffer \(activeConfiguration.effectiveMaxWidth)x\(activeConfiguration.effectiveMaxHeight))")
+        print("  - HiDPI: \(activeConfiguration.hiDPIEnabled), serial: \(activeConfiguration.serialNumber)")
+        print("  - Modes: \(activeConfiguration.displayModes.map { "\($0.width)x\($0.height)@\($0.refreshRate)Hz" })")
         
         // Create the virtual display
         let display = CGVirtualDisplay(descriptor: descriptor)
@@ -148,11 +170,20 @@ public final class VirtualDisplay: ObservableObject {
         
         print("[VirtualDisplay] Created with displayID: \(display.displayID)")
         print("[VirtualDisplay] Available screens: \(NSScreen.screens.map { "\($0.localizedName): \($0.displayID)" })")
+
+        // A zero display ID means CoreGraphics refused the descriptor outright,
+        // which happens when another live display already claims this identity.
+        guard display.displayID != 0 else {
+            print("[VirtualDisplay] ERROR: CoreGraphics returned display ID 0 - identity already in use")
+            tearDown()
+            delegate?.virtualDisplay(self, didEncounterError: .failedToCreate)
+            return
+        }
         
         // Configure settings
         let settings = CGVirtualDisplaySettings()
-        settings.hiDPI = configuration.hiDPIEnabled ? 1 : 0
-        settings.modes = configuration.displayModes.map { mode in
+        settings.hiDPI = activeConfiguration.hiDPIEnabled ? 1 : 0
+        settings.modes = activeConfiguration.displayModes.map { mode in
             CGVirtualDisplayMode(
                 width: UInt(mode.width),
                 height: UInt(mode.height),
@@ -161,6 +192,12 @@ public final class VirtualDisplay: ObservableObject {
         }
         let success = display.apply(settings)
         print("[VirtualDisplay] Applied settings: \(success)")
+        if !success {
+            print("[VirtualDisplay] ERROR: Settings rejected - check that the modes fit the framebuffer budget")
+            tearDown()
+            delegate?.virtualDisplay(self, didEncounterError: .unsupportedConfiguration)
+            return
+        }
         print("[VirtualDisplay] Display modes after apply: \(display.modes ?? [])")
         print("[VirtualDisplay] Display hiDPI: \(display.hiDPI)")
         
@@ -182,13 +219,25 @@ public final class VirtualDisplay: ObservableObject {
     
     /// Stops and destroys the virtual display
     public func stop() {
+        didRetryWithNewIdentity = false
+        tearDown()
+    }
+
+    /// Releases the CoreGraphics display and resets all state.
+    ///
+    /// Also used when the display fails to come online: keeping a dead
+    /// `CGVirtualDisplay` alive blocks the next `start()`, because it still owns
+    /// the display identity the new descriptor asks for.
+    private func tearDown() {
         screenChangeSubscription?.cancel()
         screenChangeSubscription = nil
         cursorTrackingSubscription?.cancel()
         cursorTrackingSubscription = nil
         retrySubscription?.cancel()
         retrySubscription = nil
-        
+        retryCount = 0
+
+        didApplyPreferredMode = false
         virtualDisplay = nil
         displayID = nil
         resolution = .zero
@@ -231,7 +280,7 @@ public final class VirtualDisplay: ObservableObject {
     
     private func updateScreenConfiguration() {
         guard let displayID = displayID else { return }
-        
+
         guard let screen = NSScreen.screen(withDisplayID: displayID) else {
             retryCount += 1
             if retryCount % 10 == 0 {
@@ -239,7 +288,27 @@ public final class VirtualDisplay: ObservableObject {
                 print("[VirtualDisplay] Available screens: \(NSScreen.screens.map { "\($0.localizedName): \($0.displayID)" })")
             }
             if retryCount >= Self.maxRetries {
-                print("[VirtualDisplay] ERROR: Display not found after \(Self.maxRetries) retries")
+                let totalSeconds = Double(Self.maxRetries) * Self.retryInterval
+                print("[VirtualDisplay] ERROR: Display not found after \(Int(totalSeconds * 1000))ms (\(Int(totalSeconds))s)")
+                print("[VirtualDisplay] Last available screens: \(NSScreen.screens.map { "\($0.localizedName): \($0.displayID)" })")
+                // Release the display before retrying or reporting, so the
+                // identity is free again.
+                tearDown()
+
+                // macOS can end up with a display identity it refuses to bring
+                // online - typically after two displays shared one identity.
+                // That state survives app restarts, so try once with a fresh
+                // serial number and remember it if it works.
+                if !didRetryWithNewIdentity {
+                    didRetryWithNewIdentity = true
+                    let newSerial = DisplayIdentityStore.makeSerial()
+                    print("[VirtualDisplay] Retrying with a new display identity: serial \(newSerial)")
+                    activeConfiguration.serialNumber = newSerial
+                    start()
+                    return
+                }
+
+                DisplayIdentityStore.forget(configuration)
                 delegate?.virtualDisplay(self, didEncounterError: .displayNotFound)
             }
             return
@@ -250,6 +319,19 @@ public final class VirtualDisplay: ObservableObject {
         // Found the screen - stop retry loop
         retrySubscription?.cancel()
         retrySubscription = nil
+
+        // macOS restores whatever mode it last used for this display identity,
+        // which can be smaller than the one that was asked for.
+        if !didApplyPreferredMode {
+            didApplyPreferredMode = true
+            if applyPreferredMode(displayID: displayID) {
+                // `screen.frame` still reports the old mode on this turn of the
+                // run loop; publish the new size once it has caught up.
+                DispatchQueue.main.async { [weak self] in
+                    self?.updateScreenConfiguration()
+                }
+            }
+        }
         
         let newResolution = screen.frame.size
         let newScaleFactor = screen.backingScaleFactor
@@ -262,12 +344,45 @@ public final class VirtualDisplay: ObservableObject {
         isReady = true
         
         if !wasReady {
+            if activeConfiguration.serialNumber != configuration.serialNumber {
+                DisplayIdentityStore.remember(activeConfiguration.serialNumber, for: configuration)
+            }
             delegate?.virtualDisplayDidBecomeReady(self)
         } else if resolutionChanged {
             delegate?.virtualDisplay(self, didChangeResolution: newResolution, scaleFactor: newScaleFactor)
         }
     }
     
+    /// Switches the display to the first configured mode if it came up smaller
+    @discardableResult
+    private func applyPreferredMode(displayID: CGDirectDisplayID) -> Bool {
+        guard let preferred = activeConfiguration.displayModes.first else { return false }
+
+        let scale = activeConfiguration.hiDPIEnabled ? 2 : 1
+        let targetWidth = preferred.width * scale
+        let targetHeight = preferred.height * scale
+
+        let current = CGDisplayCopyDisplayMode(displayID)
+        if current?.pixelWidth == targetWidth && current?.pixelHeight == targetHeight { return false }
+
+        let options = [kCGDisplayShowDuplicateLowResolutionModes: kCFBooleanTrue!] as CFDictionary
+        guard let modes = CGDisplayCopyAllDisplayModes(displayID, options) as? [CGDisplayMode],
+              let match = modes.first(where: { $0.pixelWidth == targetWidth && $0.pixelHeight == targetHeight })
+        else {
+            print("[VirtualDisplay] No \(targetWidth)x\(targetHeight) mode available to switch to")
+            return false
+        }
+
+        var configRef: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&configRef) == .success, let configRef = configRef else { return false }
+        CGConfigureDisplayWithDisplayMode(configRef, displayID, match, nil)
+        // For this session only, so the app does not rewrite the user's saved
+        // display preferences.
+        let result = CGCompleteDisplayConfiguration(configRef, .forSession)
+        print("[VirtualDisplay] Switched to \(targetWidth)x\(targetHeight): \(result == .success)")
+        return result == .success
+    }
+
     private func updateCursorLocation() {
         guard let displayID = displayID else {
             if isCursorInside {
@@ -288,5 +403,39 @@ public final class VirtualDisplay: ObservableObject {
             isCursorInside = newCursorInside
             delegate?.virtualDisplay(self, cursorDidEnter: newCursorInside)
         }
+    }
+}
+
+// MARK: - Display Identity Recovery
+
+/// Remembers replacement serial numbers for display identities macOS refuses to
+/// bring online.
+///
+/// The bad state lives in the window server, not in this process, so it outlives
+/// the app; without a persisted replacement every launch would have to rediscover
+/// it the slow way.
+enum DisplayIdentityStore {
+    private static let keyPrefix = "VirtualDisplayKit.identity."
+
+    private static func key(for configuration: VirtualDisplayConfiguration) -> String {
+        "\(keyPrefix)\(configuration.vendorID).\(configuration.productID).\(configuration.serialNumber)"
+    }
+
+    /// A serial that previously worked in place of the configured one
+    static func recoveredSerial(for configuration: VirtualDisplayConfiguration) -> UInt32? {
+        (UserDefaults.standard.object(forKey: key(for: configuration)) as? NSNumber)?.uint32Value
+    }
+
+    static func remember(_ serial: UInt32, for configuration: VirtualDisplayConfiguration) {
+        UserDefaults.standard.set(NSNumber(value: serial), forKey: key(for: configuration))
+    }
+
+    static func forget(_ configuration: VirtualDisplayConfiguration) {
+        UserDefaults.standard.removeObject(forKey: key(for: configuration))
+    }
+
+    /// A fresh, non-zero serial number
+    static func makeSerial() -> UInt32 {
+        UInt32.random(in: 1...UInt32.max)
     }
 }

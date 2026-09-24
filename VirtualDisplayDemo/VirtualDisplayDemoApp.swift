@@ -35,6 +35,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Configure app appearance
         NSApp.appearance = NSAppearance(named: .darkAqua)
+
+        // Auto-start window-layer tracking when enabled (default true).
+        let defaults = UserDefaults.standard
+        let enabled = defaults.object(forKey: "trackWindowLayers") == nil || defaults.bool(forKey: "trackWindowLayers")
+        if enabled {
+            Task { @MainActor in
+                WindowLayerCoordinator.shared.start()
+            }
+        }
     }
     
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -70,6 +79,7 @@ struct GeneralSettingsView: View {
     @AppStorage("defaultResolution") var defaultResolution = "1080p"
     @AppStorage("showCursor") var showCursor = true
     @AppStorage("highlightOnHover") var highlightOnHover = true
+    @AppStorage("trackWindowLayers") var trackWindowLayers = true
     
     var body: some View {
         Form {
@@ -81,6 +91,24 @@ struct GeneralSettingsView: View {
             
             Toggle("Show Cursor in Display", isOn: $showCursor)
             Toggle("Highlight Window When Cursor Inside", isOn: $highlightOnHover)
+            
+            Divider()
+            
+            Toggle("Start Window-Layer Tracking at Launch", isOn: $trackWindowLayers)
+                .help("Automatically track and raise other apps' windows when the app launches.")
+            
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Raising detached or dependent windows of other apps works best with Accessibility access.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                
+                Button("Open Accessibility Settings") {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            }
         }
         .padding()
     }

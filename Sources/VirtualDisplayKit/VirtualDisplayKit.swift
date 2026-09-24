@@ -20,4 +20,5 @@
 // - DisplayStreamRenderer (Core/DisplayStreamRenderer.swift)
 // - DisplayRecorder, RecordingConfiguration, DisplayRecorderError, DisplayRecorderDelegate (Core/DisplayRecorder.swift)
 // - FrameOutputStream, StreamOutputConfiguration, StreamOutputFormat, FrameOutputStreamDelegate (Core/FrameOutputStream.swift)
+// - WindowLayerCoordinator (Core/WindowLayerCoordinator.swift)
 // - NSScreen extensions (Extensions/NSScreen+Extensions.swift)

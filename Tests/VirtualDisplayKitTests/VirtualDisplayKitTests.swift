@@ -53,6 +53,87 @@ final class VirtualDisplayKitTests: XCTestCase {
         XCTAssert(config.displayModes.contains { $0.height > $0.width })
     }
     
+    func testPreset2K() {
+        let config = VirtualDisplayConfiguration.preset2K
+
+        XCTAssertEqual(config.maxWidth, 2560)
+        XCTAssertEqual(config.maxHeight, 1440)
+        XCTAssert(config.displayModes.contains { $0.width == 2560 && $0.height == 1440 })
+    }
+
+    func testEveryResolutionPresetHasAMatchingNativeMode() {
+        for resolution in DisplayResolutionPreset.allCases {
+            for orientation in DisplayOrientation.allCases {
+                let config = VirtualDisplayConfiguration.preset(resolution, orientation: orientation)
+                let size = resolution.pixelSize(for: orientation)
+
+                XCTAssertEqual(config.maxWidth, UInt32(size.width))
+                XCTAssertEqual(config.maxHeight, UInt32(size.height))
+                XCTAssert(
+                    config.displayModes.contains { $0.width == size.width && $0.height == size.height },
+                    "\(resolution) \(orientation) is missing its native mode"
+                )
+            }
+        }
+    }
+
+    /// A HiDPI display needs a framebuffer twice its largest mode, otherwise it
+    /// is created but never appears in `NSScreen.screens`.
+    func testHiDPIFramebufferFitsLargestMode() {
+        for resolution in DisplayResolutionPreset.allCases {
+            let config = VirtualDisplayConfiguration.preset(resolution, hiDPI: true)
+            let widest = config.displayModes.map(\.width).max() ?? 0
+            let tallest = config.displayModes.map(\.height).max() ?? 0
+
+            XCTAssertGreaterThanOrEqual(config.effectiveMaxWidth, UInt32(widest * 2))
+            XCTAssertGreaterThanOrEqual(config.effectiveMaxHeight, UInt32(tallest * 2))
+        }
+    }
+
+    func testNonHiDPIFramebufferMatchesLargestMode() {
+        let config = VirtualDisplayConfiguration(
+            maxWidth: 1920,
+            maxHeight: 1080,
+            hiDPIEnabled: false,
+            displayModes: [DisplayMode(width: 1920, height: 1080)]
+        )
+
+        XCTAssertEqual(config.effectiveMaxWidth, 1920)
+        XCTAssertEqual(config.effectiveMaxHeight, 1080)
+    }
+
+    /// macOS remembers the selected mode per display identity, so two presets
+    /// must never share one.
+    func testPresetsUseDistinctDisplayIdentities() {
+        var serials = Set<UInt32>()
+        for resolution in DisplayResolutionPreset.allCases {
+            for orientation in DisplayOrientation.allCases {
+                let config = VirtualDisplayConfiguration.preset(resolution, orientation: orientation)
+                XCTAssertTrue(
+                    serials.insert(config.serialNumber).inserted,
+                    "\(resolution) \(orientation) reuses serial \(config.serialNumber)"
+                )
+            }
+        }
+    }
+
+    /// Without HiDPI the resolution is what the display actually renders.
+    func testPresetsArePixelExactByDefault() {
+        let config = VirtualDisplayConfiguration.preset(.uhd4K)
+
+        XCTAssertFalse(config.hiDPIEnabled)
+        XCTAssertEqual(config.effectiveMaxWidth, 3840)
+        XCTAssertEqual(config.effectiveMaxHeight, 2160)
+    }
+
+    func testResolutionPresetsAreOrderedBySize() {
+        let ordered = DisplayResolutionPreset.ordered
+        XCTAssertEqual(ordered.first, .hd720)
+        XCTAssertEqual(ordered.last, .uhd5K)
+        XCTAssertEqual(DisplayResolutionPreset.qhd2K.landscapeSize.width, 2560)
+        XCTAssertEqual(DisplayResolutionPreset.qhd2K.pixelSize(for: .portrait).width, 1440)
+    }
+
     // MARK: - Display Mode Tests
     
     func testDisplayModeAspectRatio() {

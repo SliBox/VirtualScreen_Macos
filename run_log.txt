@@ -1,0 +1,16 @@
+Failed to get or decode unavailable reasons
+[Hotkey] Global hotkey monitor set up. Press ⌃⌥⌘Space to return cursor to primary screen.
+[Hotkey] Note: Global monitoring requires Accessibility permission in System Settings.
+[VirtualDisplay] Creating display with config:
+  - Name: Virtual Display 1080p
+  - Max size: 1920x1080
+  - Modes: ["1920x1080@60.0Hz", "1280x720@60.0Hz"]
+[VirtualDisplay] Created with displayID: 14
+[VirtualDisplay] Available screens: ["DELL P2219H: 3"]
+com.apple.Display.VirtualDisplayMetrics event not enabled in CoreAnalytics config
+[VirtualDisplay] Applied settings: true
+[VirtualDisplay] Display modes after apply: [<CGVirtualDisplayMode: 0x6000030c58c0>, <CGVirtualDisplayMode: 0x6000030c63a0>]
+[VirtualDisplay] Display hiDPI: 2
+[VirtualDisplay] Found screen: Virtual Display 1080p at (1920.0, 0.0, 1920.0, 1080.0)
+[DisplayStreamRenderer] CGDisplayStream: Starting stream for display 14 at 1920x1080 (scaleFactor: 1.0)
+[DisplayStreamRenderer] CGDisplayStream: Failed to create stream for display 14

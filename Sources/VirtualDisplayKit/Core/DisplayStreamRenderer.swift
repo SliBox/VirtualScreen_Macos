@@ -12,20 +12,27 @@ import ScreenCaptureKit
 /// A view that renders a display stream using the appropriate backend
 @MainActor
 public final class DisplayStreamRenderer: NSView {
-    
+
+    /// Logs a line for every captured frame.
+    ///
+    /// Off by default: at 60 Hz this runs on the main thread often enough to
+    /// visibly slow down the app (and anything streaming alongside it).
+    public nonisolated(unsafe) static var logsEveryFrame = false
+
     // MARK: - Properties
-    
+
     // Using nonisolated(unsafe) to allow cleanup in deinit
     private nonisolated(unsafe) var displayStream: CGDisplayStream?
     private nonisolated(unsafe) var scStream: SCStream?
     private nonisolated(unsafe) var streamOutput: SCStreamOutputHandler?
-    
+
     private var currentDisplayID: CGDirectDisplayID?
     private var currentResolution: CGSize = .zero
     private var currentScaleFactor: CGFloat = 1.0
-    
+
     private let backend: StreamingBackend
     private let showCursor: Bool
+    private var scPermissionDenied = false
     
     /// Called when a new frame is available (IOSurface)
     public var onFrameAvailable: ((IOSurface) -> Void)?
@@ -86,18 +93,18 @@ public final class DisplayStreamRenderer: NSView {
            (displayStream != nil || scStream != nil) {
             return
         }
-        
+
         // Stop existing stream
         stopStream()
-        
+
         // Store current configuration
         currentDisplayID = displayID
         currentResolution = resolution
         currentScaleFactor = scaleFactor
-        
+
         // Start appropriate stream based on backend preference
         let effectiveBackend = resolveBackend()
-        
+
         switch effectiveBackend {
         case .screenCaptureKit:
             startScreenCaptureKitStream(displayID: displayID, resolution: resolution, scaleFactor: scaleFactor)
@@ -110,7 +117,7 @@ public final class DisplayStreamRenderer: NSView {
     public func stopStream() {
         displayStream?.stop()
         displayStream = nil
-        
+
         if let stream = scStream {
             Task {
                 try? await stream.stopCapture()
@@ -118,6 +125,7 @@ public final class DisplayStreamRenderer: NSView {
         }
         scStream = nil
         streamOutput = nil
+        scPermissionDenied = false
     }
     
     /// Converts a point in view coordinates to display coordinates
@@ -141,9 +149,8 @@ public final class DisplayStreamRenderer: NSView {
     private func resolveBackend() -> StreamingBackend {
         switch backend {
         case .automatic:
-            // Prefer ScreenCaptureKit on macOS 12.3+, but note there are known issues
-            // with virtual displays, so we default to CGDisplayStream for now
-            return .cgDisplayStream
+            // Use ScreenCaptureKit for virtual displays (CGDisplayStream doesn't support them)
+            return .screenCaptureKit
         case .screenCaptureKit:
             return .screenCaptureKit
         case .cgDisplayStream:
@@ -152,9 +159,18 @@ public final class DisplayStreamRenderer: NSView {
     }
     
     private func startCGDisplayStream(displayID: CGDirectDisplayID, resolution: CGSize, scaleFactor: CGFloat) {
-        let outputWidth = Int(resolution.width * scaleFactor)
-        let outputHeight = Int(resolution.height * scaleFactor)
-        
+        // For virtual displays, don't multiply by scaleFactor to avoid exceeding display capabilities
+        let outputWidth = Int(resolution.width)
+        let outputHeight = Int(resolution.height)
+
+        print("[DisplayStreamRenderer] CGDisplayStream: Starting stream for display \(displayID) at \(outputWidth)x\(outputHeight) (scaleFactor: \(scaleFactor))")
+
+        // Verify display is valid
+        guard CGDisplayIsOnline(displayID) != 0 else {
+            print("[DisplayStreamRenderer] CGDisplayStream: Display \(displayID) is offline")
+            return
+        }
+
         let stream = CGDisplayStream(
             dispatchQueueDisplay: displayID,
             outputWidth: outputWidth,
@@ -165,14 +181,24 @@ public final class DisplayStreamRenderer: NSView {
             ] as CFDictionary,
             queue: .main,
             handler: { [weak self] _, _, frameSurface, _ in
-                guard let surface = frameSurface else { return }
+                guard let surface = frameSurface else {
+                    // Only log this once per second to avoid spam
+                    return
+                }
+                if Self.logsEveryFrame {
+                    print("[DisplayStreamRenderer] CGDisplayStream: Frame received (\(IOSurfaceGetWidth(surface))x\(IOSurfaceGetHeight(surface)))")
+                }
                 self?.handleFrame(surface: surface)
             }
         )
-        
+
         if let stream = stream {
+            print("[DisplayStreamRenderer] CGDisplayStream: Stream created successfully")
             displayStream = stream
-            stream.start()
+            let status = stream.start()
+            print("[DisplayStreamRenderer] CGDisplayStream: Stream start status = \(status)")
+        } else {
+            print("[DisplayStreamRenderer] CGDisplayStream: Failed to create stream for display \(displayID)")
         }
     }
     
@@ -181,28 +207,36 @@ public final class DisplayStreamRenderer: NSView {
             do {
                 // Get available content
                 let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-                
+
                 // Find our display
                 guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
+                    print("[DisplayStreamRenderer] ScreenCaptureKit: Display \(displayID) not found in shareable content. Falling back to CGDisplayStream.")
                     // Fall back to CGDisplayStream
                     startCGDisplayStream(displayID: displayID, resolution: resolution, scaleFactor: scaleFactor)
                     return
                 }
-                
+
+                print("[DisplayStreamRenderer] ScreenCaptureKit: Starting stream for display \(displayID)")
+
                 // Create filter for the display
                 let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
-                
-                // Configure stream
+
+                // Configure stream. Use the display's PIXEL dimensions (not points):
+                // virtual displays are often HiDPI (2x), and capturing at point size
+                // yields only a partial (e.g. top half) frame.
                 let configuration = SCStreamConfiguration()
-                configuration.width = Int(resolution.width * scaleFactor)
-                configuration.height = Int(resolution.height * scaleFactor)
+                let pixelWidth = CGDisplayPixelsWide(displayID)
+                let pixelHeight = CGDisplayPixelsHigh(displayID)
+                let fallbackScale = max(scaleFactor, 1.0)
+                configuration.width = pixelWidth > 0 ? Int(pixelWidth) : max(1, Int(resolution.width * fallbackScale))
+                configuration.height = pixelHeight > 0 ? Int(pixelHeight) : max(1, Int(resolution.height * fallbackScale))
                 configuration.minimumFrameInterval = CMTime(value: 1, timescale: 60)
                 configuration.showsCursor = showCursor
                 configuration.pixelFormat = kCVPixelFormatType_32BGRA
-                
+
                 // Create stream
                 let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
-                
+
                 // Create output handler
                 let output = SCStreamOutputHandler { [weak self] surface, pixelBuffer in
                     Task { @MainActor [weak self] in
@@ -210,26 +244,43 @@ public final class DisplayStreamRenderer: NSView {
                     }
                 }
                 streamOutput = output
-                
+
                 try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: .main)
                 try await stream.startCapture()
-                
+
+                print("[DisplayStreamRenderer] ScreenCaptureKit: Stream started successfully")
                 scStream = stream
-                
+
             } catch {
-                // Fall back to CGDisplayStream
-                startCGDisplayStream(displayID: displayID, resolution: resolution, scaleFactor: scaleFactor)
+                let errorDesc = "\(error)"
+                if errorDesc.contains("-3801") || errorDesc.contains("declined") {
+                    print("[DisplayStreamRenderer] ScreenCaptureKit: Permission denied (-3801)")
+                    print("[DisplayStreamRenderer] ⚠️ User must grant Screen Recording permission:")
+                    print("[DisplayStreamRenderer]    System Settings > Privacy & Security > Screen Recording")
+                    print("[DisplayStreamRenderer]    Then add this app to the allowed list")
+                    // Don't fall back - CGDisplayStream doesn't support virtual displays
+                } else {
+                    print("[DisplayStreamRenderer] ScreenCaptureKit: Error starting stream - \(error). Trying CGDisplayStream.")
+                    // Fall back to CGDisplayStream for other errors
+                    Task { @MainActor [weak self] in
+                        self?.startCGDisplayStream(displayID: displayID, resolution: resolution, scaleFactor: scaleFactor)
+                    }
+                }
             }
         }
     }
     
     private func handleFrame(surface: IOSurface, pixelBuffer: CVPixelBuffer? = nil) {
+        if Self.logsEveryFrame {
+            print("[DisplayStreamRenderer] Frame received: \(IOSurfaceGetWidth(surface))x\(IOSurfaceGetHeight(surface))")
+        }
+
         // Update display
         layer?.contents = surface
-        
+
         // Notify callbacks
         onFrameAvailable?(surface)
-        
+
         // Create pixel buffer from surface if not provided and callback exists
         if let callback = onPixelBufferAvailable {
             if let buffer = pixelBuffer {

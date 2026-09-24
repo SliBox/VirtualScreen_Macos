@@ -79,22 +79,32 @@ struct ExampleContentView: View {
         HStack {
             Text("Virtual Display")
                 .font(.headline)
-            
+
             Spacer()
-            
+
             // Preset picker
             Picker("Preset", selection: $viewModel.selectedPreset) {
                 Text("1080p").tag(VirtualDisplayController.ConfigurationPreset.standard1080p)
                 Text("1080p Portrait").tag(VirtualDisplayController.ConfigurationPreset.portrait1080p)
+                Text("2K").tag(VirtualDisplayController.ConfigurationPreset.standard2K)
+                Text("2K Portrait").tag(VirtualDisplayController.ConfigurationPreset.portrait2K)
                 Text("4K").tag(VirtualDisplayController.ConfigurationPreset.high4K)
                 Text("4K Portrait").tag(VirtualDisplayController.ConfigurationPreset.portrait4K)
             }
             .pickerStyle(.segmented)
             .frame(maxWidth: 400)
             .disabled(viewModel.isDisplayActive)
-            
+
             Spacer()
-            
+
+            // Capture button
+            if viewModel.isDisplayActive && viewModel.isReady {
+                Button("Capture") {
+                    viewModel.captureFrame()
+                }
+                .buttonStyle(.bordered)
+            }
+
             // Start/Stop button
             Button(viewModel.isDisplayActive ? "Stop" : "Start") {
                 viewModel.toggleDisplay()
@@ -195,6 +205,24 @@ class ExampleViewModel: ObservableObject {
             setupObservers()
             controller.start()
             isDisplayActive = true
+        }
+    }
+
+    func captureFrame() {
+        Task {
+            let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
+            let filename = "VirtualDisplay_\(DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .short)).jpg"
+                .replacingOccurrences(of: ":", with: "-")
+            let fileURL = downloadsURL.appendingPathComponent(filename)
+
+            do {
+                if let url = try await controller.captureFrame(to: fileURL) {
+                    print("✅ Frame captured to: \(url.path)")
+                    NSWorkspace.shared.open(url)
+                }
+            } catch {
+                print("❌ Capture failed: \(error)")
+            }
         }
     }
 }

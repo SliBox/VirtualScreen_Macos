@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSScreenRecordingUsageDescription</key>
+	<string>To capture virtual display content</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Required for screen capture functionality</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Required for screen capture functionality</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>To stream the virtual display to browsers on your local network</string>
+</dict>
+</plist>

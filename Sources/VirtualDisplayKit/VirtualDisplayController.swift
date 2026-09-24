@@ -7,6 +7,8 @@
 
 import Cocoa
 import Combine
+import CoreImage
+import CoreVideo
 
 /// A high-level controller that manages a virtual display with recording and streaming support
 ///
@@ -48,6 +50,12 @@ public final class VirtualDisplayController: ObservableObject {
     /// Current display ID
     public var displayID: CGDirectDisplayID? { virtualDisplay.displayID }
     
+    /// Last error reported by the virtual display, if any
+    ///
+    /// Set when the display cannot be created or never comes online; cleared on
+    /// the next `start()`.
+    @Published public private(set) var displayError: String?
+
     /// Whether recording is active
     @Published public private(set) var isRecording = false
     
@@ -59,11 +67,28 @@ public final class VirtualDisplayController: ObservableObject {
     
     /// Current streaming frame rate
     @Published public private(set) var streamingFrameRate: Double = 0
-    
+
+    /// Whether the display is being served to browsers over the network
+    @Published public private(set) var isBrowserStreaming = false
+
+    /// Live statistics for the browser stream
+    @Published public private(set) var browserStreamStats = BrowserStreamStats()
+
+    /// URLs other devices can open to watch the display
+    @Published public private(set) var browserStreamEndpoints: [BrowserStreamEndpoint] = []
+
+    /// The code a viewer enters to control the Mac, while the browser stream
+    /// runs with `allowsControl`; `nil` otherwise
+    @Published public private(set) var browserStreamControlPIN: String?
+
+    /// Last error reported by the browser stream server, if any
+    @Published public private(set) var browserStreamError: String?
+
     // MARK: - Recording & Streaming
-    
+
     private var recorder: DisplayRecorder?
     private var frameOutputStream: FrameOutputStream?
+    private var browserStreamServer: BrowserStreamServer?
     private var displayView: VirtualDisplayNSView?
     
     // MARK: - Private Properties
@@ -78,8 +103,22 @@ public final class VirtualDisplayController: ObservableObject {
     /// - Parameter configuration: Display configuration (defaults to preset1080p)
     public init(configuration: VirtualDisplayConfiguration = .preset1080p) {
         self.virtualDisplay = VirtualDisplay(configuration: configuration)
+        self.virtualDisplay.delegate = self
     }
-    
+
+    /// Creates a new controller for a standard resolution
+    /// - Parameters:
+    ///   - resolution: The native resolution of the display
+    ///   - orientation: Landscape or portrait
+    ///   - hiDPI: Render at 2x the resolution (see `VirtualDisplayConfiguration.preset`)
+    public convenience init(
+        resolution: DisplayResolutionPreset,
+        orientation: DisplayOrientation = .landscape,
+        hiDPI: Bool = false
+    ) {
+        self.init(configuration: .preset(resolution, orientation: orientation, hiDPI: hiDPI))
+    }
+
     /// Creates a new controller with a preset configuration
     /// - Parameter preset: The preset to use
     public convenience init(preset: ConfigurationPreset) {
@@ -88,6 +127,10 @@ public final class VirtualDisplayController: ObservableObject {
             self.init(configuration: .preset1080p)
         case .portrait1080p:
             self.init(configuration: .preset1080pPortrait)
+        case .standard2K:
+            self.init(configuration: .preset2K)
+        case .portrait2K:
+            self.init(configuration: .preset2KPortrait)
         case .high4K:
             self.init(configuration: .preset4K)
         case .portrait4K:
@@ -99,6 +142,7 @@ public final class VirtualDisplayController: ObservableObject {
     
     /// Starts the virtual display
     public func start() {
+        displayError = nil
         virtualDisplay.start()
     }
     
@@ -113,7 +157,11 @@ public final class VirtualDisplayController: ObservableObject {
         if isStreaming {
             stopStreaming()
         }
-        
+
+        if isBrowserStreaming {
+            stopBrowserStream()
+        }
+
         captureRenderer?.stopStream()
         captureRenderer = nil
         
@@ -232,7 +280,87 @@ public final class VirtualDisplayController: ObservableObject {
             captureRenderer = nil
         }
     }
-    
+
+    // MARK: - Browser Streaming
+
+    /// Serves the virtual display to any browser on the local network
+    ///
+    /// The returned endpoints are the URLs to open on another device, e.g.
+    /// `http://192.168.1.42:8080`. Frames are pushed over a WebSocket at the
+    /// configured frame rate; the page is served from the same port.
+    ///
+    /// - Parameter configuration: Port, target frame rate and image quality
+    /// - Returns: One URL per reachable network interface
+    @discardableResult
+    public func startBrowserStream(
+        configuration: BrowserStreamConfiguration = BrowserStreamConfiguration()
+    ) throws -> [BrowserStreamEndpoint] {
+        guard !isBrowserStreaming else { return browserStreamEndpoints }
+        guard virtualDisplay.isReady, let displayID = virtualDisplay.displayID else {
+            throw BrowserStreamError.displayNotReady
+        }
+
+        let server = BrowserStreamServer(configuration: configuration)
+
+        server.onStats = { [weak self] stats in
+            MainActor.assumeIsolated {
+                self?.browserStreamStats = stats
+            }
+        }
+
+        server.onError = { [weak self] message in
+            MainActor.assumeIsolated {
+                self?.browserStreamError = message
+            }
+        }
+
+        server.onLog = { message in
+            print("[BrowserStream] \(message)")
+        }
+
+        // Capture at the display's real pixel size; HiDPI virtual displays
+        // report points, which would stream at half resolution.
+        let pixelWidth = CGDisplayPixelsWide(displayID)
+        let pixelHeight = CGDisplayPixelsHigh(displayID)
+        let pixelSize = pixelWidth > 0 && pixelHeight > 0
+            ? CGSize(width: pixelWidth, height: pixelHeight)
+            : CGSize(
+                width: virtualDisplay.resolution.width * virtualDisplay.scaleFactor,
+                height: virtualDisplay.resolution.height * virtualDisplay.scaleFactor
+            )
+
+        try server.start(displayID: displayID, pixelSize: pixelSize)
+
+        browserStreamServer = server
+        browserStreamControlPIN = server.controlPIN
+        browserStreamError = nil
+        browserStreamStats = BrowserStreamStats()
+        browserStreamEndpoints = NetworkInterfaces.localIPv4Addresses().map {
+            BrowserStreamEndpoint(address: $0, port: configuration.port)
+        }
+        isBrowserStreaming = true
+
+        return browserStreamEndpoints
+    }
+
+    /// Stops serving the display to browsers and releases the port
+    public func stopBrowserStream() {
+        guard isBrowserStreaming else { return }
+
+        browserStreamServer?.stop()
+        browserStreamServer = nil
+        browserStreamControlPIN = nil
+        browserStreamEndpoints = []
+        browserStreamStats = BrowserStreamStats()
+        isBrowserStreaming = false
+    }
+
+    /// Adjusts JPEG quality while the browser stream is running
+    /// - Parameter quality: 0.1 (smallest frames) to 1.0 (best looking)
+    public func setBrowserStreamQuality(_ quality: Double) {
+        browserStreamServer?.updateQuality(quality)
+    }
+
     // MARK: - Preview Window
     
     /// Creates a preview window that shows the virtual display contents
@@ -342,6 +470,98 @@ public final class VirtualDisplayController: ObservableObject {
         // Store reference to keep it alive
         self.captureRenderer = renderer
     }
+
+    // MARK: - Manual Capture
+
+    /// Captures a single frame from the virtual display and saves it to a file
+    /// - Parameter outputURL: Where to save the captured image (JPEG format)
+    /// - Returns: URL of the saved image if successful
+    @discardableResult
+    public func captureFrame(to outputURL: URL) async throws -> URL? {
+        guard isReady, let displayID = virtualDisplay.displayID else {
+            throw DisplayRecorderError.notConfigured
+        }
+
+        var capturedImage: CGImage?
+        let semaphore = DispatchSemaphore(value: 0)
+
+        let renderer = DisplayStreamRenderer(backend: .cgDisplayStream, showCursor: true)
+        renderer.configure(
+            displayID: displayID,
+            resolution: virtualDisplay.resolution,
+            scaleFactor: virtualDisplay.scaleFactor
+        )
+
+        renderer.onFrameAvailable = { surface in
+            // Convert IOSurface to CGImage
+            let width = IOSurfaceGetWidth(surface)
+            let height = IOSurfaceGetHeight(surface)
+
+            var pixelBuffer: CVPixelBuffer?
+            let attrs: [CFString: Any] = [
+                kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary
+            ]
+
+            let status = CVPixelBufferCreate(
+                kCFAllocatorDefault,
+                width,
+                height,
+                kCVPixelFormatType_32BGRA,
+                attrs as CFDictionary,
+                &pixelBuffer
+            )
+
+            guard status == kCVReturnSuccess, let buffer = pixelBuffer else {
+                semaphore.signal()
+                return
+            }
+
+            CVPixelBufferLockBaseAddress(buffer, [])
+            IOSurfaceLock(surface, .readOnly, nil)
+
+            let srcData = IOSurfaceGetBaseAddress(surface)
+            if let dstData = CVPixelBufferGetBaseAddress(buffer) {
+                let srcBytesPerRow = IOSurfaceGetBytesPerRow(surface)
+                let dstBytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+
+                for y in 0..<height {
+                    let srcRow = srcData.advanced(by: y * srcBytesPerRow)
+                    let dstRow = dstData.advanced(by: y * dstBytesPerRow)
+                    memcpy(dstRow, srcRow, min(srcBytesPerRow, dstBytesPerRow))
+                }
+            }
+
+            IOSurfaceUnlock(surface, .readOnly, nil)
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+
+            let ciImage = CIImage(cvPixelBuffer: buffer)
+            let context = CIContext()
+            if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
+                capturedImage = cgImage
+            }
+
+            semaphore.signal()
+        }
+
+        // Wait for first frame with timeout
+        _ = semaphore.wait(timeout: .now() + 5.0)
+        renderer.stopStream()
+
+        guard let image = capturedImage else {
+            print("[VirtualDisplayController] Failed to capture frame")
+            return nil
+        }
+
+        // Save as JPEG
+        guard let tiffData = NSBitmapImageRep(cgImage: image).tiffRepresentation,
+              let jpegData = NSBitmapImageRep(data: tiffData)?.representation(using: .jpeg, properties: [:]) else {
+            throw DisplayRecorderError.encodingFailed
+        }
+
+        try jpegData.write(to: outputURL)
+        print("[VirtualDisplayController] Frame captured to: \(outputURL.path)")
+        return outputURL
+    }
 }
 
 // MARK: - Configuration Presets
@@ -355,10 +575,35 @@ public extension VirtualDisplayController {
         /// Standard 1080p display (1080x1920) - Portrait
         case portrait1080p
         
+        /// 2K display (2560x1440) - Landscape
+        case standard2K
+
+        /// 2K display (1440x2560) - Portrait
+        case portrait2K
+
         /// High-resolution 4K display (3840x2160) - Landscape
         case high4K
         
         /// High-resolution 4K display (2160x3840) - Portrait
         case portrait4K
+    }
+}
+
+// MARK: - VirtualDisplayDelegate
+
+extension VirtualDisplayController: VirtualDisplayDelegate {
+    public func virtualDisplay(_ display: VirtualDisplay, didEncounterError error: VirtualDisplayError) {
+        displayError = error.localizedDescription
+        print("[VirtualDisplayController] Display error: \(error.localizedDescription)")
+
+        // The display is gone - tear down anything that was capturing from it.
+        if isBrowserStreaming {
+            stopBrowserStream()
+        }
+        if isStreaming {
+            stopStreaming()
+        }
+        captureRenderer?.stopStream()
+        captureRenderer = nil
     }
 }
