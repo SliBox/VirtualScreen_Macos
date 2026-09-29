@@ -254,6 +254,10 @@ enum BrowserStreamPage {
       button:active { transform: scale(.94); }
       button svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 
+      /* The picture and the screen point different ways: turning it would
+         show it larger. */
+      button.suggest { border-color: rgba(10, 132, 255, .9); box-shadow: 0 0 0 1px rgba(10, 132, 255, .5); }
+
       /* Connection state ----------------------------------------------- */
 
       #splash {
@@ -440,6 +444,9 @@ enum BrowserStreamPage {
       <button id="btnFit" class="hidden" title="Fit to screen (0)">
         <svg viewBox="0 0 24 24"><path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"/></svg>
       </button>
+      <button id="btnRotate" title="Rotate picture (O)">
+        <svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 13.7-5.6L20 8.7"/><path d="M20 3.5v5.2h-5.2"/><rect x="8" y="11" width="8" height="9" rx="1.5"/></svg>
+      </button>
       <button id="btnKeyboard" class="hidden" title="Keyboard">
         <svg viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg>
       </button>
@@ -538,11 +545,72 @@ enum BrowserStreamPage {
 
       // The canvas is laid out at its natural pixel size and moved with a
       // transform, so panning and zooming never touch the decode path.
-      const view = { scale: 1, x: 0, y: 0 };
+      // `x`, `y` place the top-left corner of the picture as it appears on
+      // screen — after `rotation`, clockwise in degrees — so fitting, panning
+      // and zooming never need to know which way it is turned.
+      const view = { scale: 1, x: 0, y: 0, rotation: 0 };
       let fitScale = 1;
+      try {
+        const saved = parseInt(localStorage.getItem('vdk-rotation'), 10);
+        if ([0, 90, 180, 270].includes(saved)) view.rotation = saved;
+      } catch (_) {}
 
       const maxScale = () => Math.max(fitScale * 8, 4);
       const isZoomed = () => view.scale > fitScale * 1.02;
+      const isSideways = () => view.rotation === 90 || view.rotation === 270;
+
+      /// The stream's size as it appears on screen.
+      const shownSize = () => isSideways()
+        ? { w: screenSize.h, h: screenSize.w }
+        : { w: screenSize.w, h: screenSize.h };
+
+      const fitFor = (size) => {
+        const { w, h } = viewport();
+        return Math.min(w / size.w, h / size.h) || 1;
+      };
+
+      /// Stream pixels to stage coordinates.
+      function toStage(sx, sy) {
+        const s = view.scale, W = screenSize.w, H = screenSize.h;
+        switch (view.rotation) {
+          case 90: return { x: view.x + s * (H - sy), y: view.y + s * sx };
+          case 180: return { x: view.x + s * (W - sx), y: view.y + s * (H - sy) };
+          case 270: return { x: view.x + s * sy, y: view.y + s * (W - sx) };
+          default: return { x: view.x + s * sx, y: view.y + s * sy };
+        }
+      }
+
+      /// Stage coordinates to stream pixels; the inverse of toStage.
+      function fromStage(px, py) {
+        const u = (px - view.x) / view.scale, v = (py - view.y) / view.scale;
+        const W = screenSize.w, H = screenSize.h;
+        switch (view.rotation) {
+          case 90: return { x: v, y: H - u };
+          case 180: return { x: W - u, y: H - v };
+          case 270: return { x: W - v, y: u };
+          default: return { x: u, y: v };
+        }
+      }
+
+      /// A movement on screen as a movement in stream pixels, unscaled.
+      function streamDelta(dx, dy) {
+        switch (view.rotation) {
+          case 90: return { x: dy, y: -dx };
+          case 180: return { x: -dx, y: -dy };
+          case 270: return { x: -dy, y: dx };
+          default: return { x: dx, y: dy };
+        }
+      }
+
+      /// CSS transform that puts an element of stream size at the view:
+      /// turned about its own corner, then shifted back into the box.
+      function viewTransform() {
+        const s = view.scale, W = screenSize.w * s, H = screenSize.h * s;
+        const shift = { 0: [0, 0], 90: [H, 0], 180: [W, H], 270: [0, W] }[view.rotation];
+        return 'translate3d(' + (view.x + shift[0]) + 'px,' + (view.y + shift[1]) + 'px,0)'
+          + (view.rotation ? ' rotate(' + view.rotation + 'deg)' : '')
+          + ' scale(' + s + ')';
+      }
 
       function sizeCanvas() {
         // Resizing a canvas clears it, so only when the stream size changes.
@@ -558,24 +626,33 @@ enum BrowserStreamPage {
       }
 
       function fitToScreen() {
-        const { w, h } = viewport();
-        fitScale = Math.min(w / screenSize.w, h / screenSize.h) || 1;
+        fitScale = fitFor(shownSize());
         view.scale = fitScale;
         applyView();
       }
 
+      /// Turns the picture a quarter clockwise and fits it again. A portrait
+      /// Mac screen on a landscape phone (or the reverse) fills far more of
+      /// it turned sideways.
+      function rotate() {
+        view.rotation = (view.rotation + 90) % 360;
+        try { localStorage.setItem('vdk-rotation', String(view.rotation)); } catch (_) {}
+        fitToScreen();
+        showToast(view.rotation ? 'Rotated ' + view.rotation + '°' : 'Upright');
+      }
+
       function applyView() {
         const { w, h } = viewport();
-        const width = screenSize.w * view.scale;
-        const height = screenSize.h * view.scale;
+        const shown = shownSize();
+        const width = shown.w * view.scale;
+        const height = shown.h * view.scale;
 
         // Centre whichever axis fits; otherwise keep the picture's edges from
         // being dragged inside the frame.
         view.x = width <= w ? (w - width) / 2 : Math.min(0, Math.max(w - width, view.x));
         view.y = height <= h ? (h - height) / 2 : Math.min(0, Math.max(h - height, view.y));
 
-        surface.style.transform =
-          'translate3d(' + view.x + 'px,' + view.y + 'px,0) scale(' + view.scale + ')';
+        surface.style.transform = viewTransform();
 
         // Past 1:1 the pixels are real information, not something to blur over.
         surface.style.imageRendering = view.scale > 1.05 ? 'pixelated' : 'auto';
@@ -587,6 +664,14 @@ enum BrowserStreamPage {
         $('btnFit').classList.toggle('hidden', !zoomed);
         document.querySelectorAll('.zoomOnly').forEach((el) => el.classList.toggle('hidden', !zoomed));
         $('mZoom').textContent = Math.round(view.scale / fitScale * 100);
+
+        // Point out the button when turning would make the picture larger.
+        const turned = isSideways()
+          ? { w: screenSize.w, h: screenSize.h }
+          : { w: screenSize.h, h: screenSize.w };
+        const btnRotate = $('btnRotate');
+        btnRotate.classList.toggle('suggest', fitFor(turned) > fitFor(shown) * 1.1);
+        btnRotate.classList.toggle('on', view.rotation !== 0);
       }
 
       // ---- Cursor ----------------------------------------------------
@@ -678,10 +763,12 @@ enum BrowserStreamPage {
         }
         // The tip follows the picture's mapping (stream pixel -> view.scale +
         // offset); the image itself may be drawn larger, about its hot spot.
+        // It turns with the picture, about its hot spot.
         const size = Math.max(view.scale, minimumCursorHeight / pointer.shape.h);
-        const x = view.x + pointer.x * view.scale - pointer.shape.hotX * size;
-        const y = view.y + pointer.y * view.scale - pointer.shape.hotY * size;
-        cursorEl.style.transform = 'translate3d(' + x + 'px,' + y + 'px,0) scale(' + size + ')';
+        const tip = toStage(pointer.x, pointer.y);
+        cursorEl.style.transform = 'translate3d(' + tip.x + 'px,' + tip.y + 'px,0)'
+          + (view.rotation ? ' rotate(' + view.rotation + 'deg)' : '')
+          + ' scale(' + size + ') translate(' + -pointer.shape.hotX + 'px,' + -pointer.shape.hotY + 'px)';
         cursorEl.style.display = 'block';
       }
 
@@ -775,9 +862,8 @@ enum BrowserStreamPage {
 
       function onViewportChange() {
         sizeToViewport();
-        const { w, h } = viewport();
         const wasFitted = !isZoomed();
-        fitScale = Math.min(w / screenSize.w, h / screenSize.h) || 1;
+        fitScale = fitFor(shownSize());
         if (wasFitted || view.scale < fitScale) view.scale = fitScale;
         applyView();
       }
@@ -1442,6 +1528,7 @@ enum BrowserStreamPage {
       $('btnFull').addEventListener('click', toggleFullscreen);
       $('btnHud').addEventListener('click', () => { chromeVisible = !chromeVisible; applyChrome(); });
       $('btnFit').addEventListener('click', fitToScreen);
+      $('btnRotate').addEventListener('click', rotate);
       $('btnReload').addEventListener('click', () => location.reload());
 
       ['keydown', 'keyup'].forEach((name) => window.addEventListener(name, controlKey));
@@ -1452,6 +1539,7 @@ enum BrowserStreamPage {
         if (event.key === 'f' || event.key === 'F') toggleFullscreen();
         if (event.key === 'h' || event.key === 'H') { chromeVisible = !chromeVisible; applyChrome(); }
         if (event.key === '0' || event.key === 'r' || event.key === 'R') fitToScreen();
+        if (event.key === 'o' || event.key === 'O') rotate();
       });
 
       // ---- Remote control --------------------------------------------
@@ -1489,8 +1577,7 @@ enum BrowserStreamPage {
       /// unless `clamp` pins it to the nearest edge (for drags that overshoot).
       function streamPoint(clientX, clientY, clamp) {
         const rect = stage.getBoundingClientRect();
-        let x = (clientX - rect.left - view.x) / view.scale;
-        let y = (clientY - rect.top - view.y) / view.scale;
+        let { x, y } = fromStage(clientX - rect.left, clientY - rect.top);
         const inside = x >= 0 && y >= 0 && x < screenSize.w && y < screenSize.h;
         if (!inside && !clamp) return null;
         x = Math.min(Math.max(x, 0), screenSize.w - 1);
@@ -1643,11 +1730,8 @@ enum BrowserStreamPage {
         } else if (gesture.decided === 'scroll') {
           // Content follows the fingers, as it does on the phone itself.
           const at = streamPoint(midX, midY, true);
-          sendInput({
-            t: 'scroll', x: at.x, y: at.y,
-            dx: -(midX - gesture.midX) / view.scale,
-            dy: -(midY - gesture.midY) / view.scale
-          });
+          const moved = streamDelta(midX - gesture.midX, midY - gesture.midY);
+          sendInput({ t: 'scroll', x: at.x, y: at.y, dx: -moved.x / view.scale, dy: -moved.y / view.scale });
         }
         gesture.spread = spread;
         gesture.midX = midX;
@@ -1689,7 +1773,9 @@ enum BrowserStreamPage {
         const point = streamPoint(event.clientX, event.clientY, false);
         if (!point) return true;
         const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? screenSize.h : 1;
-        sendInput({ t: 'scroll', x: point.x, y: point.y, dx: event.deltaX * unit, dy: event.deltaY * unit, m: modifierBits(event) });
+        // Scroll the way the picture is turned, not the way the Mac is.
+        const delta = streamDelta(event.deltaX * unit, event.deltaY * unit);
+        sendInput({ t: 'scroll', x: point.x, y: point.y, dx: delta.x, dy: delta.y, m: modifierBits(event) });
         return true;
       }
 

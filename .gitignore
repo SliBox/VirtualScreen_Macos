@@ -8,6 +8,7 @@ Package.resolved
 # Xcode
 DerivedData/
 build/
+dist/
 *.xcuserstate
 xcuserdata/
 .swiftpm/xcode/xcuserdata/
